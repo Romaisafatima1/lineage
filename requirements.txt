@@ -1,0 +1,4 @@
+openai>=3.0
+fastapi
+uvicorn
+python-dotenv
