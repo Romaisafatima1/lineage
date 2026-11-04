@@ -123,11 +123,20 @@ class LLM:
             base_url=os.environ.get("META_BASE_URL", "https://api.meta.ai/v1"),
             timeout=120,
         )
+        # The open-weights juror can run on any OpenAI-compatible host of Muse Spark Open.
+        # Default is Fireworks; set JUROR2_BASE_URL / JUROR2_API_KEY / JUROR2_MODEL to use
+        # another provider (e.g. Baseten: https://inference.baseten.co/v1,
+        # model meta-models/muse-spark-open-1026).
+        j2_model = os.environ.get("JUROR2_MODEL")
+        if j2_model:
+            ROLE_MODELS["juror_open"] = (j2_model, "fireworks")
+            PRICES.setdefault(j2_model, (1.25, 4.15))
         self.fireworks = AsyncOpenAI(
-            api_key=os.environ.get("FIREWORKS_API_KEY", ""),
-            base_url="https://api.fireworks.ai/inference/v1",
+            api_key=os.environ.get("JUROR2_API_KEY") or os.environ.get("FIREWORKS_API_KEY", ""),
+            base_url=os.environ.get("JUROR2_BASE_URL", "https://api.fireworks.ai/inference/v1"),
             timeout=120,
         )
+        self.juror2_host = os.environ.get("JUROR2_BASE_URL", "fireworks")
         self.usage = Usage()
         self.sem = asyncio.Semaphore(max_concurrency)
         self.spend_cap = spend_cap_usd
@@ -149,14 +158,17 @@ class LLM:
         """
         if self.usage.usd >= self.spend_cap:
             raise RuntimeError(f"spend cap ${self.spend_cap} reached (${self.usage.usd:.2f})")
-        model, provider = ROLE_MODELS[role]
-        client = self._client(provider)
-        sup = self._supports[provider]
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
         delay = 2.0
         last_err: Exception | None = None
         for attempt in range(6):
+            # Resolved inside the loop so a retry can switch providers after a billing error.
+            model, provider = ROLE_MODELS[role]
+            if provider == "fireworks" and getattr(self, "_fireworks_down", False):
+                model, provider = "muse-spark-1.3", "meta"      # degraded: same family, different call
+            client = self._client(provider)
+            sup = self._supports[provider]
             kwargs: dict = dict(model=model, messages=messages, max_tokens=max_tokens,
                                 temperature=temperature)
             if json_mode and sup["json"]:
@@ -182,6 +194,11 @@ class LLM:
                     continue
                 if e.status_code == 400 and "response_format" in msg and sup["json"]:
                     sup["json"] = False
+                    continue
+                if provider == "fireworks" and e.status_code in (401, 402, 404, 412):
+                    if not getattr(self, "_fireworks_down", False):
+                        print(f"!! juror-2 provider error ({e.status_code}: {str(e)[:80]}); routing {role} to Meta API for the rest of this run")
+                    self._fireworks_down = True
                     continue
                 if e.status_code in (429, 500, 502, 503, 504):
                     await asyncio.sleep(delay + random.random())

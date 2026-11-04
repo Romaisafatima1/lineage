@@ -142,7 +142,7 @@ You will see a batch of issues, your decisions, and the correct labels.
 Propose exactly ONE edit that would most reduce mistakes like these, as a general rule (never about a single issue).
 Return JSON: {"op": "add" | "change" | "delete", "rule_id": "R3" or null, "text": "the rule", "reason": "one sentence"}
 Rules must be specific and checkable, e.g. "Reports of kubelet or cgroup problems belong to area node."
-Do not restate rules that already exist."""
+Keep the rule under 60 words. Do not restate rules that already exist."""
 
 
 async def propose_edit(llm: LLM, decisions: list[dict], issues: list[Issue],

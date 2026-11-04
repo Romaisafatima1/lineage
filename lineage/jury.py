@@ -43,7 +43,7 @@ def validate(edit: dict, playbook: Playbook) -> tuple[bool, str]:
     if op in ("add", "change"):
         if len(text) < 15:
             return False, "rule text too short to be checkable"
-        if len(text) > 400:
+        if len(text) > 700:
             return False, "rule text too long"
         norm = text.lower()
         for r in playbook.rules:
@@ -84,8 +84,9 @@ class Jury:
                  kinds: list[str], areas: list[str], repo: str):
         self.llm, self.val, self.canary = llm, val, canary
         self.kinds, self.areas, self.repo = kinds, areas, repo
-        self._cache: dict[tuple[str, str], dict] = {}   # (juror, playbook hash) -> score
+        self._cache: dict[tuple[str, str, int], dict] = {}   # (juror, playbook hash, n) -> score
         self.agreements = {"agree": 0, "split": 0}
+        self.canary_slack = 2
 
     async def _score(self, juror: str, pb: Playbook, cases: list[Issue]) -> tuple[dict, float]:
         key = (juror, pb_hash(pb), len(cases))
@@ -99,23 +100,29 @@ class Jury:
     async def judge(self, old: Playbook, new: Playbook, edit: dict) -> Verdict:
         import asyncio
         usd = 0.0
-        # Both jurors score old and new on the validation set. Old scores are cached,
-        # so each edit costs roughly one validation pass per juror.
+        # Both jurors score old and new on the validation set; canaries are scored
+        # old and new too, so noise in the juror cancels out. Old scores are cached.
         tasks = []
         for j in JURORS:
             tasks.append(self._score(j, old, self.val))
             tasks.append(self._score(j, new, self.val))
+        tasks.append(self._score("juror_spark", old, self.canary))
         tasks.append(self._score("juror_spark", new, self.canary))
         results = await asyncio.gather(*tasks)
         usd += sum(r[1] for r in results)
         scores, votes = {}, {}
+        n_val = max(len(self.val), 1)
         for i, j in enumerate(JURORS):
             old_s, new_s = results[2 * i][0], results[2 * i + 1][0]
             scores[j] = {"old": old_s["both_acc"], "new": new_s["both_acc"]}
-            d = new_s["both_acc"] - old_s["both_acc"]
-            votes[j] = "accept" if d > 0 else ("reject" if d < 0 else "neutral")
-        can = results[-1][0]
-        canary = {"passed": can["both_acc"] >= 0.9, "correct": round(can["both_acc"] * can["n"]), "n": can["n"]}
+            d = round((new_s["both_acc"] - old_s["both_acc"]) * n_val)   # in cases
+            votes[j] = "accept" if d >= 1 else ("reject" if d <= -1 else "neutral")
+        can_old, can_new = results[-2][0], results[-1][0]
+        n_can = max(can_new["n"], 1)
+        kept_old, kept_new = round(can_old["both_acc"] * n_can), round(can_new["both_acc"] * n_can)
+        # Allow juror noise (about 2 cases on 15) but catch real forgetting.
+        canary = {"passed": kept_new >= kept_old - self.canary_slack, "correct": kept_new,
+                  "before": kept_old, "n": n_can}
 
         if votes[JURORS[0]] == votes[JURORS[1]]:
             self.agreements["agree"] += 1
@@ -123,14 +130,15 @@ class Jury:
             self.agreements["split"] += 1
 
         if not canary["passed"]:
-            return Verdict("reject", f"canary regression: {canary['correct']}/{canary['n']} kept",
+            return Verdict("reject", f"canary regression: {kept_new}/{n_can} kept (was {kept_old})",
                            votes, scores, canary, None, usd)
         vs = set(votes.values())
-        if vs == {"accept"}:
-            return Verdict("accept", "both jurors improved on validation", votes, scores, canary, None, usd)
-        if vs == {"reject"} or (vs == {"reject", "neutral"}):
+        if vs == {"accept"} or vs == {"accept", "neutral"}:
+            return Verdict("accept", "validation improved and nothing old broke", votes, scores, canary, None, usd)
+        if "reject" in vs and "accept" not in vs:
             return Verdict("reject", "validation score dropped", votes, scores, canary, None, usd)
-        # Split or a wash: escalate to the arbiter, then to the human queue.
+        # Jurors split (accept vs reject) or a wash (neutral, neutral): arbiter rules,
+        # and a split goes to the human queue with the ruling attached.
         ruling, cost = await self.arbitrate(old, new, edit, scores, canary)
         usd += cost
         decision = "review" if {"accept", "reject"} <= vs else ruling["decision"]
