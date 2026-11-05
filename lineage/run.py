@@ -284,13 +284,34 @@ def _h(pb: Playbook) -> str:
     return pb_hash(pb)
 
 
+CONVENTIONS = {
+    # Positive control: a project convention a frozen model cannot know. Issues owned by
+    # auth or api-machinery are relabeled to a new team, "platform", in EVERY split, so the
+    # baseline is wrong on them and only an agent that learns the rule can score.
+    "platform": {"auth": "platform", "api-machinery": "platform"},
+}
+
+
+def apply_convention(ds: Dataset, name: str) -> Dataset:
+    mapping = CONVENTIONS[name]
+    for split in (ds.learn, ds.val, ds.probe, ds.test):
+        for i in split:
+            i.areas = sorted({mapping.get(a, a) for a in i.areas})
+    ds.areas = sorted({mapping.get(a, a) for a in ds.areas})
+    return ds
+
+
 def load_dataset(args) -> Dataset:
     if args.mock:
-        return build_dataset(make_synthetic(), val_n=20, probe_n=20, test_n=30, min_per_label=5)
-    path = DATA_DIR / f"{args.repo.replace('/', '__')}.jsonl"
-    if not path.exists():
-        raise SystemExit(f"no data at {path}. Run: python -m lineage.data_cli --repo {args.repo}")
-    return build_dataset(load_issues(path), val_n=args.val, probe_n=args.probe_n, test_n=args.test_n)
+        ds = build_dataset(make_synthetic(), val_n=20, probe_n=20, test_n=30, min_per_label=5)
+    else:
+        path = DATA_DIR / f"{args.repo.replace('/', '__')}.jsonl"
+        if not path.exists():
+            raise SystemExit(f"no data at {path}. Run: python -m lineage.data_cli --repo {args.repo}")
+        ds = build_dataset(load_issues(path), val_n=args.val, probe_n=args.probe_n, test_n=args.test_n)
+    if args.convention:
+        ds = apply_convention(ds, args.convention)
+    return ds
 
 
 def main():
@@ -314,6 +335,8 @@ def main():
     p.add_argument("--spend-cap", type=float, default=200.0)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--mock", action="store_true", help="offline: fake model, synthetic data")
+    p.add_argument("--convention", choices=list(CONVENTIONS), default=None,
+                   help="positive control: relabel areas by a project convention the model cannot know")
     args = p.parse_args()
 
     ds = load_dataset(args)

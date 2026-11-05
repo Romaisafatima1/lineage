@@ -79,6 +79,9 @@ def main():
         cfg = next(e for e in ev if e["type"] == "run_start")["config"]
         ds = build_dataset(load_issues(DATA_DIR / f"{a.repo.replace('/', '__')}.jsonl"),
                            val_n=cfg["val"], probe_n=cfg["probe_n"], test_n=cfg["test_n"], seed=cfg["seed"])
+        if cfg.get("convention"):
+            from .run import apply_convention
+            ds = apply_convention(ds, cfg["convention"])
         asyncio.run(noise_floor(ds, a.repo))
 
 

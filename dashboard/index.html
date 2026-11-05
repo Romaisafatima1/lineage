@@ -51,7 +51,7 @@
 <footer>Built with Muse Spark Open · Muse Spark · Muse Wonder · Muse Code — every number on this page is computed from the run's event log.</footer>
 
 <script>
-const VIEWS = ["Triage", "Curves", "Divergence", "Edits", "Review queue", "Blame", "Rollback", "Cost"];
+const VIEWS = ["Triage", "Curves", "Divergence", "Edits", "Review queue", "Blame", "Rollback", "Bisect", "Cost"];
 let EV = [], view = "Triage", state = { lineage: null, issue: null };
 const colorOf = n => n.startsWith("gated") ? "var(--gated)" : n.startsWith("ungated") ? "var(--ungated)" : "var(--base)";
 const hex = n => n.startsWith("gated") ? "#5b8def" : n.startsWith("ungated") ? "#e5534b" : "#8b91a3";
@@ -89,7 +89,8 @@ function render() {
   const m = document.getElementById("main");
   if (!EV.length) return;
   m.innerHTML = ({ "Triage": vTriage, "Curves": vCurves, "Divergence": vDivergence, "Edits": vEdits,
-                   "Review queue": vReview, "Blame": vBlame, "Rollback": vRollback, "Cost": vCost })[view]();
+                   "Review queue": vReview, "Blame": vBlame, "Rollback": vRollback, "Bisect": vBisect, "Cost": vCost })[view]();
+  if (view === "Bisect") drawBisect();
   if (view === "Curves") drawCurves();
   if (view === "Divergence") drawDivergence();
   if (view === "Cost") drawCost();
@@ -223,7 +224,11 @@ function vBlame() {
   const pb = Object.fromEntries(ft.playbook.rules.map(r => [r.id, r]));
   const edits = Object.fromEntries(by("edit").map(e => [e.edit_id, e]));
   const trail = d ? (d.rule_ids || []).map(id => { const r = pb[id]; const e = r?.edit_id ? edits[r.edit_id] : null; return { id, r, e }; }) : [];
+  const cited = {}, wrong = {};
+  for (const x of ft.decisions) { const ok = x.kind === x.true_kind && x.true_areas.includes(x.area); for (const id of (x.rule_ids || [])) { cited[id] = (cited[id] || 0) + 1; if (!ok) wrong[id] = (wrong[id] || 0) + 1; } }
+  const board = Object.keys(cited).sort((a, b) => (wrong[b] || 0) - (wrong[a] || 0) || cited[b] - cited[a]).slice(0, 5).map(id => { const r = pb[id]; const e = r?.edit_id ? edits[r.edit_id] : null; return `<tr><td class="mono">${id}</td><td>${esc(r?.text || "(removed)")}</td><td>${cited[id]}</td><td class="${wrong[id] ? "miss" : "ok"}">${wrong[id] || 0} (${pct((wrong[id] || 0) / cited[id])})</td><td class="sub">${e ? `g${e.gen} <span class="tag ${e.decision}">${e.decision}</span>${e.poisoned_batch ? ' <span class="tag review">poisoned</span>' : ""}` : "seed"}</td></tr>`; }).join("");
   return `<div class="card"><div class="row" style="justify-content:space-between"><h2>Blame · ${sel}</h2><span class="sub">${misses.length} misses of ${ft.decisions.length} on the locked test set</span></div>
+  <div style="margin:10px 0 14px"><div class="sub" style="margin-bottom:6px">Rule accountability: rules most relied on in wrong decisions, and the edit that introduced each.</div><table><tr><th>Rule</th><th>Text</th><th>Cited</th><th>Wrong</th><th>Origin</th></tr>${board}</table></div>
   <div class="row"><select onchange="state.issue=this.value;render()">${ft.decisions.map(x => `<option value="${x.id}" ${x.id === state.issue ? "selected" : ""}>#${x.id} ${x.kind === x.true_kind && x.true_areas.includes(x.area) ? "✓" : "✗"} said ${x.kind}/${x.area}, truth ${x.true_kind}/${x.true_areas.join("|")}</option>`).join("")}</select></div>
   ${d ? `<div style="margin-top:14px">${trail.length ? trail.map(t => t.r ? `<div class="card" style="margin-bottom:10px"><div><span class="mono">[${t.id}]</span> ${esc(t.r.text)}</div>
       ${t.e ? `<div class="sub" style="margin-top:6px">Introduced by <span class="mono">${t.e.edit_id}</span> at generation ${t.e.gen} · verdict <span class="tag ${t.e.decision}">${t.e.decision}</span> · ${esc(t.e.reason)}${t.e.poisoned_batch ? ' · <span class="tag review">learned from the poisoned batch</span>' : ""}</div>
@@ -238,6 +243,21 @@ function vRollback() {
     <div class="grid g2"><div><div class="sub">with the edit</div><div class="stat">${pct(r.with.test.both_acc)}</div><div class="sub">locked test · val ${pct(r.with.val.both_acc)}</div></div>
     <div><div class="sub">without it</div><div class="stat" style="color:${r.without.test.both_acc >= r.with.test.both_acc ? "var(--good)" : "var(--bad)"}">${pct(r.without.test.both_acc)}</div><div class="sub">locked test · val ${pct(r.without.val.both_acc)}</div></div></div>
     <div class="diff" style="margin-top:10px">${diffHtml(r.with.playbook, r.without.playbook)}</div></div>`).join("");
+}
+
+// ---------- Bisect: the generation that broke the agent ----------
+function vBisect() {
+  const b = by("bisect");
+  if (!b.length) return `<div class="card"><h2>Bisect</h2><div class="empty">No bisect yet. <span class="mono">python -m lineage.bisect --run &lt;run&gt; --lineage ungated-3</span> scores a lineage's playbook as it stood at each generation on the locked test set, so you can see the exact generation where learning turned into damage.</div></div>`;
+  const lns = [...new Set(b.map(e => e.lineage))];
+  return `<div class="card"><h2>Locked-test accuracy of each historical playbook</h2><canvas id="c6"></canvas><div class="sub" style="margin-top:8px">Like git bisect for an agent: every point is the playbook as it stood at that generation, scored on 100 issues it never learned from. ${b[0].poison_gen ? `The poisoned batch was learned at generation ${b[0].poison_gen}.` : ""}</div></div>`;
+}
+function drawBisect() {
+  const b = by("bisect"); const lns = [...new Set(b.map(e => e.lineage))];
+  const ds = lns.map(n => ({ label: n, data: b.filter(e => e.lineage === n).map(e => ({ x: e.gen, y: e.score.both_acc })), borderColor: hex(n), backgroundColor: hex(n), tension: .25, pointRadius: 4 }));
+  const base = by("final_test", e => e.lineage === "baseline")[0];
+  if (base) ds.push({ label: "frozen baseline", data: [{ x: 0, y: base.score.both_acc }, { x: Math.max(...b.map(e => e.gen)), y: base.score.both_acc }], borderColor: "#8b91a3", borderDash: [2, 4], pointRadius: 0 });
+  new Chart(document.getElementById("c6"), { type: "line", data: { datasets: ds }, options: { scales: { x: { type: "linear", title: { display: true, text: "generation" }, ticks: { color: "#8b91a3" }, grid: { color: "#262a36" } }, y: { min: 0, max: 1, ticks: { color: "#8b91a3", callback: v => (v * 100) + "%" }, grid: { color: "#262a36" } } }, plugins: { legend: { labels: { color: "#e6e8ef" } } } } });
 }
 
 // ---------- Cost ----------

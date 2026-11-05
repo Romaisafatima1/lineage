@@ -73,6 +73,9 @@ async def rollback(run: str, lineage: str, edit_id: str, repo: str):
     cfg = next(e for e in events if e["type"] == "run_start")["config"]
     ds = build_dataset(load_issues(DATA_DIR / f"{repo.replace('/', '__')}.jsonl"),
                        val_n=cfg["val"], probe_n=cfg["probe_n"], test_n=cfg["test_n"], seed=cfg["seed"])
+    if cfg.get("convention"):
+        from .run import apply_convention
+        ds = apply_convention(ds, cfg["convention"])
     with_edit = rebuild(events, lineage, ds.kinds, ds.areas)
     without = rebuild(events, lineage, ds.kinds, ds.areas, skip=edit_id)
     llm = LLM()
